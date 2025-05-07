@@ -3,7 +3,8 @@ from aiogram import Router, F
 from aiogram.types import Message
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-
+from aiogram.exceptions import TelegramBadRequest
+g
 load_dotenv()
 router: Router = Router()
 
@@ -18,33 +19,43 @@ chat_histories: dict[int, list[dict]] = {}
 async def handle_chat(message: Message):
     bot = message.bot
     chat_id = message.chat.id
-
-    # 1) Append user message to history
     history = chat_histories.setdefault(chat_id, [])
     history.append({"role": "user", "content": message.text})
 
-    # 2) Send a placeholder reply (we'll edit this)
+    # send placeholder
     sent = await message.reply("⏳ thinking...")
 
-    # 3) Call OpenAI with stream=True — await to get the async iterator
+    # await to get async iterator
     stream = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=history,
         stream=True
     )
 
-    # 4) Iterate over chunks and edit the same message
     full_text = ""
+    last_sent = ""  # track what we've already sent to Telegram
+
     async for chunk in stream:
-        # chunk.choices[0].delta.content holds the incremental text
         delta = chunk.choices[0].delta.content
-        if delta:
-            full_text += delta
-            await bot.edit_message_text(
+        if not delta:
+            continue
+
+        full_text += delta
+
+        # only try edit if there's new content beyond what was last sent
+        if full_text == last_sent:
+            continue
+
+        try:
+            await message.bot.edit_message_text(
                 text=full_text,
                 chat_id=chat_id,
                 message_id=sent.message_id
             )
+            last_sent = full_text
+        except TelegramBadRequest as e:
+            # ignore "message is not modified" errors, re-raise others
+            if "message is not modified" not in e.args[0]:
+                raise
 
-    # 5) Save assistant’s reply to history
     history.append({"role": "assistant", "content": full_text})
