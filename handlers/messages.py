@@ -2,6 +2,7 @@ import os
 import asyncio
 from aiogram import Router, F
 from aiogram.types import Message
+from aiogram.enums import ParseMode
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
@@ -50,7 +51,8 @@ async def handle_chat(message: Message):
                 await message.bot.edit_message_text(
                     text=full_text,
                     chat_id=chat_id,
-                    message_id=sent.message_id
+                    message_id=sent.message_id,
+                    parse_mode=ParseMode.MARKDOWN
                 )
                 last_edit = now
             except TelegramRetryAfter as e:
@@ -59,7 +61,8 @@ async def handle_chat(message: Message):
                 await message.bot.edit_message_text(
                     text=full_text,
                     chat_id=chat_id,
-                    message_id=sent.message_id
+                    message_id=sent.message_id,
+                    parse_mode=ParseMode.MARKDOWN
                 )
                 last_edit = time.monotonic()
 
@@ -68,7 +71,8 @@ async def handle_chat(message: Message):
         await message.bot.edit_message_text(
             text=full_text,
             chat_id=chat_id,
-            message_id=sent.message_id
+            message_id=sent.message_id,
+            parse_mode=ParseMode.MARKDOWN
         )
 
     # 5) Добавляем ответ ассистента в историю
