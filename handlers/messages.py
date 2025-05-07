@@ -1,9 +1,10 @@
 import os
+import asyncio
 from aiogram import Router, F
 from aiogram.types import Message
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 load_dotenv()
 router: Router = Router()
@@ -19,43 +20,62 @@ chat_histories: dict[int, list[dict]] = {}
 async def handle_chat(message: Message):
     bot = message.bot
     chat_id = message.chat.id
+    # Добавляем сообщение пользователя в историю
     history = chat_histories.setdefault(chat_id, [])
     history.append({"role": "user", "content": message.text})
 
-    # send placeholder
+    # Отправляем плейсхолдер-ответ
     sent = await message.reply("⏳ thinking...")
 
-    # await to get async iterator
+    # Получаем асинхронный итератор чанков (await обязательный)
     stream = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=history,
         stream=True
     )
 
-    full_text = ""
-    last_sent = ""  # track what we've already sent to Telegram
+    buffer = ""  # накопленный текст для редактирования
+    debounce_task = None  # задача-дебаунсер
 
-    async for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if not delta:
-            continue
-
-        full_text += delta
-
-        # only try edit if there's new content beyond what was last sent
-        if full_text == last_sent:
-            continue
-
+    async def debounce_flush():
+        nonlocal buffer
+        # Ждём 1 секунду перед первым редактированием
+        await asyncio.sleep(1)
+        text_to_send = buffer
+        buffer = ""
         try:
             await message.bot.edit_message_text(
-                text=full_text,
+                text=text_to_send,
                 chat_id=chat_id,
                 message_id=sent.message_id
             )
-            last_sent = full_text
+        except TelegramRetryAfter as e:
+            # если вернули retry_after — ждём и повторяем
+            await asyncio.sleep(e.retry_after)
+            await message.bot.edit_message_text(
+                text=text_to_send,
+                chat_id=chat_id,
+                message_id=sent.message_id
+            )
         except TelegramBadRequest as e:
-            # ignore "message is not modified" errors, re-raise others
-            if "message is not modified" not in e.args[0]:
-                raise
+            # если вернули 400 — не редактируем
+            print(e)
+            pass
 
-    history.append({"role": "assistant", "content": full_text})
+    async for chunk in stream:
+        delta = chunk.choices[0].delta.content  # прирост текста
+        if not delta:
+            continue
+
+        buffer += delta
+
+        # Если раньше не запущен дебаунсер — запускаем
+        if debounce_task is None or debounce_task.done():
+            debounce_task = asyncio.create_task(debounce_flush())
+
+    # После завершения потока — дожидаемся последнего фтапа debounce
+    if debounce_task:
+        await debounce_task
+
+    # Сохраняем ответ ассистента
+    history.append({"role": "assistant", "content": buffer})
