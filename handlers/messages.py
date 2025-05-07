@@ -4,7 +4,7 @@ from aiogram.types import Message
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from aiogram.exceptions import TelegramBadRequest
-g
+
 load_dotenv()
 router: Router = Router()
 
