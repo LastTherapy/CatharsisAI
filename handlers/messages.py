@@ -12,70 +12,75 @@ router: Router = Router()
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 
-# In-memory chat histories: { chat_id: [ {"role":"user"/"assistant", "content":...}, ... ] }
 chat_histories: dict[int, list[dict]] = {}
 
 
 @router.message(F.text, F.chat.type == "private")
 async def handle_chat(message: Message):
-    bot = message.bot
     chat_id = message.chat.id
-    # Добавляем сообщение пользователя в историю
+    # 1) Сохраняем историю
     history = chat_histories.setdefault(chat_id, [])
     history.append({"role": "user", "content": message.text})
 
-    # Отправляем плейсхолдер-ответ
+    # 2) Плейсхолдер
     sent = await message.reply("⏳ thinking...")
 
-    # Получаем асинхронный итератор чанков (await обязательный)
+    # 3) Получаем стрим (await нужен!)
     stream = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=history,
         stream=True
     )
 
-    buffer = ""  # накопленный текст для редактирования
-    debounce_task = None  # задача-дебаунсер
+    full_text = ""
+    debounce_task: asyncio.Task | None = None
 
-    async def debounce_flush():
-        nonlocal buffer
-        # Ждём 1 секунду перед первым редактированием
-        await asyncio.sleep(1)
-        text_to_send = buffer
-        buffer = ""
+    async def schedule_flush():
+        # Ждём 1 секунду перед редактированием
         try:
+            await asyncio.sleep(1)
+            # Используем весь накопленный full_text
+            text = full_text
             await message.bot.edit_message_text(
-                text=text_to_send,
+                text=text,
                 chat_id=chat_id,
                 message_id=sent.message_id
             )
         except TelegramRetryAfter as e:
-            # если вернули retry_after — ждём и повторяем
+            # Если телеграм вернул retry_after, ждём и повторяем
             await asyncio.sleep(e.retry_after)
             await message.bot.edit_message_text(
-                text=text_to_send,
+                text=text,
                 chat_id=chat_id,
                 message_id=sent.message_id
             )
-        except TelegramBadRequest as e:
-            # если вернули 400 — не редактируем
-            print(e)
-            pass
+        except asyncio.CancelledError:
+            # Если задачу отменили — просто выходим
+            return
 
     async for chunk in stream:
-        delta = chunk.choices[0].delta.content  # прирост текста
+        delta = chunk.choices[0].delta.content
         if not delta:
             continue
+        full_text += delta
 
-        buffer += delta
+        # Отменяем предыдущий запланированный флаш, если он ещё не выполнился
+        if debounce_task and not debounce_task.done():
+            debounce_task.cancel()
+        # Запускаем новую задачу-дебаунсер
+        debounce_task = asyncio.create_task(schedule_flush())
 
-        # Если раньше не запущен дебаунсер — запускаем
-        if debounce_task is None or debounce_task.done():
-            debounce_task = asyncio.create_task(debounce_flush())
-
-    # После завершения потока — дожидаемся последнего фтапа debounce
+    # После окончания стрима — дожидаемся последнего обновления
     if debounce_task:
-        await debounce_task
+        try:
+            await debounce_task
+        except asyncio.CancelledError:
+            # Если отменили его после стрима — всё равно делаем финальный флаш
+            await message.bot.edit_message_text(
+                text=full_text,
+                chat_id=chat_id,
+                message_id=sent.message_id
+            )
 
-    # Сохраняем ответ ассистента
-    history.append({"role": "assistant", "content": buffer})
+    # 4) Сохраняем ответ ассистента
+    history.append({"role": "assistant", "content": full_text})
