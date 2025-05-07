@@ -5,6 +5,7 @@ from aiogram.types import Message
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
+import time
 
 load_dotenv()
 router: Router = Router()
@@ -18,14 +19,14 @@ chat_histories: dict[int, list[dict]] = {}
 @router.message(F.text, F.chat.type == "private")
 async def handle_chat(message: Message):
     chat_id = message.chat.id
-    # 1) Сохраняем историю
+    # 1) Сохраняем в историю
     history = chat_histories.setdefault(chat_id, [])
     history.append({"role": "user", "content": message.text})
 
-    # 2) Плейсхолдер
-    sent = await message.reply("⏳ thinking...")
+    # 2) Отправляем “черновик”
+    sent = await message.reply("⏳")
 
-    # 3) Получаем стрим (await нужен!)
+    # 3) Запрашиваем стрим (await обязательно!)
     stream = await openai_client.chat.completions.create(
         model="gpt-4o-mini",
         messages=history,
@@ -33,30 +34,8 @@ async def handle_chat(message: Message):
     )
 
     full_text = ""
-    debounce_task: asyncio.Task | None = None
-
-    async def schedule_flush():
-        # Ждём 1 секунду перед редактированием
-        try:
-            await asyncio.sleep(1)
-            # Используем весь накопленный full_text
-            text = full_text
-            await message.bot.edit_message_text(
-                text=text,
-                chat_id=chat_id,
-                message_id=sent.message_id
-            )
-        except TelegramRetryAfter as e:
-            # Если телеграм вернул retry_after, ждём и повторяем
-            await asyncio.sleep(e.retry_after)
-            await message.bot.edit_message_text(
-                text=text,
-                chat_id=chat_id,
-                message_id=sent.message_id
-            )
-        except asyncio.CancelledError:
-            # Если задачу отменили — просто выходим
-            return
+    last_edit = time.monotonic()  # отметка времени последнего edit
+    throttle_interval = 0.2       # минимум 200 мс между правками
 
     async for chunk in stream:
         delta = chunk.choices[0].delta.content
@@ -64,23 +43,33 @@ async def handle_chat(message: Message):
             continue
         full_text += delta
 
-        # Отменяем предыдущий запланированный флаш, если он ещё не выполнился
-        if debounce_task and not debounce_task.done():
-            debounce_task.cancel()
-        # Запускаем новую задачу-дебаунсер
-        debounce_task = asyncio.create_task(schedule_flush())
+        now = time.monotonic()
+        # если с последнего обновления прошло ≥throttle_interval
+        if now - last_edit >= throttle_interval:
+            try:
+                await message.bot.edit_message_text(
+                    text=full_text,
+                    chat_id=chat_id,
+                    message_id=sent.message_id
+                )
+                last_edit = now
+            except TelegramRetryAfter as e:
+                # Telegram просит подождать — спим нужное время
+                await asyncio.sleep(e.retry_after)
+                await message.bot.edit_message_text(
+                    text=full_text,
+                    chat_id=chat_id,
+                    message_id=sent.message_id
+                )
+                last_edit = time.monotonic()
 
-    # После окончания стрима — дожидаемся последнего обновления
-    if debounce_task:
-        try:
-            await debounce_task
-        except asyncio.CancelledError:
-            # Если отменили его после стрима — всё равно делаем финальный флаш
-            await message.bot.edit_message_text(
-                text=full_text,
-                chat_id=chat_id,
-                message_id=sent.message_id
-            )
+    # 4) Финальный flush (если остались недосафиксированные символы)
+    if full_text and time.monotonic() - last_edit >= 0:
+        await message.bot.edit_message_text(
+            text=full_text,
+            chat_id=chat_id,
+            message_id=sent.message_id
+        )
 
-    # 4) Сохраняем ответ ассистента
+    # 5) Добавляем ответ ассистента в историю
     history.append({"role": "assistant", "content": full_text})
