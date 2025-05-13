@@ -7,6 +7,11 @@ from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 import time
+import base64
+import sqlite3
+from PIL import Image
+from io import BytesIO
+import datetime
 
 load_dotenv()
 router: Router = Router()
@@ -30,7 +35,7 @@ async def handle_chat(message: Message):
 
     # 3) Запрашиваем стрим (await обязателен)
     stream = await openai_client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4.1-nano",
         messages=history,
         stream=True
     )
@@ -99,3 +104,42 @@ async def handle_chat(message: Message):
 
     # 5) Сохраняем ответ ассистента
     history.append({"role": "assistant", "content": full_text})
+
+
+@router.message(F.photo, F.chat.type == "private")
+async def photo_handler(message: Message):
+    images = []
+    for photo in message.photo:
+        file = await message.bot.get_file(photo.file_id)
+        image_stream = await message.bot.download_file(file.file_path)
+        image_bytes = image_stream.read()
+        encoded = base64.b64encode(image_bytes).decode('utf-8')
+        images.append(encoded)
+
+    comment = ""
+    if message.caption is not None:
+        comment = message.caption
+
+    completion = openai_client.chat.completions.create(
+        model="gpt-4.1-nano",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": comment},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{images[0]}",
+                        },
+                    },
+                ],
+            }
+        ],
+    )
+    result = completion.choices[0].message.content
+    await message.reply(text=result)
+
+@router.message()
+async def all_others(message: Message):
+    print(message)
