@@ -120,7 +120,7 @@ async def photo_handler(message: Message):
     if message.caption is not None:
         comment = message.caption
 
-    completion = openai_client.chat.completions.create(
+    completion = await openai_client.chat.completions.create(
         model="gpt-4.1-nano",
         messages=[
             {
@@ -139,6 +139,7 @@ async def photo_handler(message: Message):
     )
     result = completion.choices[0].message.content
     await message.reply(text=result)
+
 
 @router.message()
 async def all_others(message: Message):
