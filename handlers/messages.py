@@ -8,10 +8,7 @@ from dotenv import load_dotenv
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 import time
 import base64
-import sqlite3
-from PIL import Image
-from io import BytesIO
-import datetime
+
 
 load_dotenv()
 router: Router = Router()
@@ -116,29 +113,37 @@ async def photo_handler(message: Message):
         encoded = base64.b64encode(image_bytes).decode('utf-8')
         images.append(encoded)
 
-    comment = ""
+    message_blocks = []
+
     if message.caption is not None:
-        comment = message.caption
+        message_blocks.append({"type": "text", "text": message.caption})
+
+    for image in images:
+        message_blocks.append({
+            "type": "image_url",
+            "image_url": {
+                "url": f"data:image/jpeg;base64,{image}",
+            },
+        })
 
     completion = await openai_client.chat.completions.create(
         model="gpt-4.1-nano",
         messages=[
             {
                 "role": "user",
-                "content": [
-                    {"type": "text", "text": comment},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{images[0]}",
-                        },
-                    },
-                ],
+                "content": message_blocks,
             }
         ],
     )
     result = completion.choices[0].message.content
     await message.reply(text=result)
+
+    history_content = "пользователь предоставил изображение" if message.caption is None else (("пользователь "
+                                                                                              "предоставил "
+                                                                                              "изображение и дал "
+                                                                                              "такой комментарий: ")
+                                                                                              + message.caption)
+    chat_histories[message.chat.id].append({"role": "user", "content": history_content})
 
 
 @router.message()
