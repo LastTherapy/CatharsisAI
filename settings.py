@@ -1,0 +1,1 @@
+MAX_HISTORY = 20

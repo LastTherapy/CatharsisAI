@@ -9,22 +9,21 @@ from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 import time
 import base64
 import mimetypes
-
+from db.memory_driver import MemoryDriver
 
 load_dotenv()
 router: Router = Router()
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-chat_histories: dict[int, list[dict]] = {}
 
-MAX_HISTORY = 20
+
+db_driver = MemoryDriver()
 
 
 @router.message(F.text, F.chat.type == "private")
 async def handle_chat(message: Message):
     chat_id = message.chat.id
 
-    # 1) Сохраняем запрос пользователя
-    history = chat_histories.setdefault(chat_id, [])
+    history = db_driver.get_history(chat_id)
     history.append({"role": "user", "content": message.text})
 
     # 2) Отправляем плейсхолдер с Markdown-mode
@@ -102,13 +101,16 @@ async def handle_chat(message: Message):
             else:
                 raise
 
-    # 5) Сохраняем ответ ассистента
-    history.append({"role": "assistant", "content": full_text})
+    db_driver.add(chat_id, message.text, full_text)
 
 
 @router.message(F.photo, F.chat.type == "private")
 async def photo_handler(message: Message):
+    history = db_driver.get_history(message.chat.id)
+
+    message_blocks = []
     images = []
+
     for photo in message.photo:
         file = await message.bot.get_file(photo.file_id)
         image_stream = await message.bot.download_file(file.file_path)
@@ -121,10 +123,8 @@ async def photo_handler(message: Message):
         data_url = f"data:{mimetype};base64,{encoded}"
         images.append(data_url)
 
-    message_blocks = []
     if message.caption is not None:
         message_blocks.append({"type": "text", "text": message.caption})
-
     for image in images:
         message_blocks.append({
             "type": "image_url",
@@ -133,24 +133,20 @@ async def photo_handler(message: Message):
             },
         })
 
+    history.append({"role": "user", "content": message_blocks})
     completion = await openai_client.chat.completions.create(
         model="gpt-4.1-nano",
-        messages=[
-            {
-                "role": "user",
-                "content": message_blocks,
-            }
-        ],
+        messages=history
     )
     result = completion.choices[0].message.content
     await message.reply(text=result)
 
-    history_content = "пользователь предоставил изображение" if message.caption is None else (("пользователь "
+    history_input = "пользователь предоставил изображение" if message.caption is None else (("пользователь "
                                                                                               "предоставил "
                                                                                               "изображение и дал "
                                                                                               "такой комментарий: ")
                                                                                               + message.caption)
-    chat_histories[message.chat_id].append({"role": "user", "content": history_content})
+    db_driver.add(message.chat.id, history_input, result)
 
 
 @router.message()
