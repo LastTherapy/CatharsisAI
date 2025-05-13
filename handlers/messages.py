@@ -8,12 +8,15 @@ from dotenv import load_dotenv
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 import time
 import base64
+import mimetypes
 
 
 load_dotenv()
 router: Router = Router()
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 chat_histories: dict[int, list[dict]] = {}
+
+MAX_HISTORY = 20
 
 
 @router.message(F.text, F.chat.type == "private")
@@ -111,10 +114,14 @@ async def photo_handler(message: Message):
         image_stream = await message.bot.download_file(file.file_path)
         image_bytes = image_stream.read()
         encoded = base64.b64encode(image_bytes).decode('utf-8')
-        images.append(encoded)
+
+        mimetype = mimetypes.guess_type(file.file_path)[0]
+        if mimetype is None:
+            mimetype = "image/jpeg"
+        data_url = f"data:{mimetype};base64,{encoded}"
+        images.append(data_url)
 
     message_blocks = []
-
     if message.caption is not None:
         message_blocks.append({"type": "text", "text": message.caption})
 
@@ -122,7 +129,7 @@ async def photo_handler(message: Message):
         message_blocks.append({
             "type": "image_url",
             "image_url": {
-                "url": f"data:image/jpeg;base64,{image}",
+                "url": image,
             },
         })
 
@@ -143,7 +150,7 @@ async def photo_handler(message: Message):
                                                                                               "изображение и дал "
                                                                                               "такой комментарий: ")
                                                                                               + message.caption)
-    chat_histories[message.chat.id].append({"role": "user", "content": history_content})
+    chat_histories[message.chat_id].append({"role": "user", "content": history_content})
 
 
 @router.message()
